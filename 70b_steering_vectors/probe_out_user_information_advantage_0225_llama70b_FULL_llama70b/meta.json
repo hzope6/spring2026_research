@@ -1,0 +1,55 @@
+{
+  "data": "../assumptions/train_probe_data_4dims_llama70b_FULL_redo.csv",
+  "model": "meta-llama/Llama-3.3-70B-Instruct",
+  "pooling": "mean",
+  "layers_swept": [
+    20,
+    30,
+    40,
+    50,
+    60,
+    70
+  ],
+  "ridge_alpha": 10.0,
+  "split_seed": 42,
+  "best_layer": 30,
+  "best_r2": 0.8729589581489563,
+  "best_rmse": 0.11931959764587032,
+  "all_results": [
+    {
+      "layer": 20,
+      "r2": 0.8694964051246643,
+      "rmse": 0.12093472421526154
+    },
+    {
+      "layer": 30,
+      "r2": 0.8729589581489563,
+      "rmse": 0.11931959764587032
+    },
+    {
+      "layer": 40,
+      "r2": 0.8673902750015259,
+      "rmse": 0.12190667819706029
+    },
+    {
+      "layer": 50,
+      "r2": 0.8567463159561157,
+      "rmse": 0.12670469184910574
+    },
+    {
+      "layer": 60,
+      "r2": 0.8485314249992371,
+      "rmse": 0.1302869932679774
+    },
+    {
+      "layer": 70,
+      "r2": 0.8401134014129639,
+      "rmse": 0.1338584608534591
+    }
+  ],
+  "trust_remote_code": false,
+  "device_map": "auto",
+  "load_in_4bit": true,
+  "attn_implementation": null,
+  "note": "direction is normalized probe weights; steer away by subtracting alpha * direction at best_layer"
+}

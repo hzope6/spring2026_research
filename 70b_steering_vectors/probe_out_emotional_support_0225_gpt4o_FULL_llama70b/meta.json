@@ -1,0 +1,55 @@
+{
+  "data": "../assumptions/train_probe_data_supportv2_gpt4o_FULL.csv",
+  "model": "meta-llama/Llama-3.3-70B-Instruct",
+  "pooling": "mean",
+  "layers_swept": [
+    20,
+    30,
+    40,
+    50,
+    60,
+    70
+  ],
+  "ridge_alpha": 10.0,
+  "split_seed": 42,
+  "best_layer": 30,
+  "best_r2": 0.9054948687553406,
+  "best_rmse": 0.09733815361547873,
+  "all_results": [
+    {
+      "layer": 20,
+      "r2": 0.9003554582595825,
+      "rmse": 0.0999498485557717
+    },
+    {
+      "layer": 30,
+      "r2": 0.9054948687553406,
+      "rmse": 0.09733815361547873
+    },
+    {
+      "layer": 40,
+      "r2": 0.9023954272270203,
+      "rmse": 0.09892145262245262
+    },
+    {
+      "layer": 50,
+      "r2": 0.8965877294540405,
+      "rmse": 0.10182194857694062
+    },
+    {
+      "layer": 60,
+      "r2": 0.887678325176239,
+      "rmse": 0.10611754007427647
+    },
+    {
+      "layer": 70,
+      "r2": 0.877470850944519,
+      "rmse": 0.1108345416981333
+    }
+  ],
+  "trust_remote_code": false,
+  "device_map": "auto",
+  "load_in_4bit": true,
+  "attn_implementation": null,
+  "note": "direction is normalized probe weights; steer away by subtracting alpha * direction at best_layer"
+}

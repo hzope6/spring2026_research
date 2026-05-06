@@ -1,0 +1,55 @@
+{
+  "data": "../assumptions/train_probe_data_supportv2_gemini_FULL.csv",
+  "model": "meta-llama/Llama-3.3-70B-Instruct",
+  "pooling": "mean",
+  "layers_swept": [
+    20,
+    30,
+    40,
+    50,
+    60,
+    70
+  ],
+  "ridge_alpha": 10.0,
+  "split_seed": 42,
+  "best_layer": 30,
+  "best_r2": 0.4722525477409363,
+  "best_rmse": 0.09464618871475737,
+  "all_results": [
+    {
+      "layer": 20,
+      "r2": 0.45181065797805786,
+      "rmse": 0.09646179228376348
+    },
+    {
+      "layer": 30,
+      "r2": 0.4722525477409363,
+      "rmse": 0.09464618871475737
+    },
+    {
+      "layer": 40,
+      "r2": 0.4543578028678894,
+      "rmse": 0.09623743301874345
+    },
+    {
+      "layer": 50,
+      "r2": 0.4110339283943176,
+      "rmse": 0.09998507798143438
+    },
+    {
+      "layer": 60,
+      "r2": 0.36989349126815796,
+      "rmse": 0.10341821441765299
+    },
+    {
+      "layer": 70,
+      "r2": 0.3307400345802307,
+      "rmse": 0.10658288517393708
+    }
+  ],
+  "trust_remote_code": false,
+  "device_map": "auto",
+  "load_in_4bit": true,
+  "attn_implementation": null,
+  "note": "direction is normalized probe weights; steer away by subtracting alpha * direction at best_layer"
+}
