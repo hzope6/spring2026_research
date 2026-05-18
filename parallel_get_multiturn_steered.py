@@ -69,16 +69,16 @@ def build_simulate_user_prompt(
     history_clean: str,
     seek_validation: bool | None = None,
     persona: str | None = None,
-) -> str:
+    ) -> str:
     """Build prompt for simulating User A's next message."""
     base = f"""{user_llm_system_prompt}
 
-Conversation so far:
-\"\"\"
-{history_clean}
-\"\"\"
+    Conversation so far:
+    \"\"\"
+    {history_clean}
+    \"\"\"
 
-Generate only what User A would say next—one or a few natural messages, as a real user would respond. Output nothing else: no labels, no "User A:", no explanation. Just the next user message."""
+    Generate only what User A would say next—one or a few natural messages, as a real user would respond. Output nothing else: no labels, no "User A:", no explanation. Just the next user message."""
     if persona:
         snippet = PERSONA_CHOICES.get(persona)
         if snippet is None:
