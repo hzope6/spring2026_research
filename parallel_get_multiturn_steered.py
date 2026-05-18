@@ -74,7 +74,7 @@ def build_simulate_user_prompt(
     """Build prompt for simulating User A's next message."""
 
     base = (
-        f"{user_llm_system_prompt}\n\n"
+        f"{user_llm_system_prompt}\n"
         f"Conversation so far:\n"
         f'"""\n'
         f"{history_clean}\n"
