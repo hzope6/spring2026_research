@@ -28,7 +28,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from types import SimpleNamespace
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -67,8 +67,8 @@ PERSONA_CHOICES = {
 
 def build_simulate_user_prompt(
     history_clean: str,
-    seek_validation: bool | None = None,
-    persona: str | None = None,
+    seek_validation: Optional[bool] = None,
+    persona: Optional[str] = None,
     ) -> str:
     """Build prompt for simulating User A's next message."""
     base = f"""{user_llm_system_prompt}
@@ -99,7 +99,7 @@ def build_simulate_user_prompt(
 # -----------------------------------------------------------------------------
 
 _assistant_lock = Lock()
-_steer_bundle: dict | None = None
+_steer_bundle: Optional[dict] = None
 
 
 def _init_steered_assistant(
@@ -223,10 +223,10 @@ def run_for_row_steered(
     row: pd.Series,
     user_cols: list[str],
     prompt_type: str,
-    max_user_turns: int | None,
-    user_sim_mode: int | None,
+    max_user_turns: Optional[int],
+    user_sim_mode: Optional[int],
     user_sim_switch_turn: int,
-    persona: str | None,
+    persona: Optional[str],
     assistant_generate: Callable[[str], str],
     steer_meta: dict,
 ) -> list[dict]:
