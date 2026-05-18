@@ -47,7 +47,7 @@ _PROBES_DIR = os.path.join(os.path.dirname(__file__), "verbalizedassumptions", "
 if _PROBES_DIR not in sys.path:
     sys.path.insert(0, _PROBES_DIR)
 
-import verbalized_assumptions.assumption_probes.sample_and_generate_steered as sgs  # noqa: E402
+import sample_and_generate_steered as sgs  # noqa: E402
 
 # -----------------------------------------------------------------------------
 # Personas (prompts.py) for simulated user
