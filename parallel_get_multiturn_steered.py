@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 Multi-turn simulated conversations (user simulator + assistant), with a locally
 steered HF assistant (activation steering from a trained probe direction).
