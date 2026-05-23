@@ -4,19 +4,26 @@ Multi-turn simulated conversations (user simulator + assistant), with a locally
 steered HF assistant (activation steering from a trained probe direction).
 
 User turns: same pipeline as parallel_get_multiturn.py (API or local via make_api_call).
-Assistant: Hugging Face causal LM + forward hook from assumption_probes (see sample_and_generate_steered.py).
+Assistant: Hugging Face causal LM + forward hook from assumption_probes.
 
-Examples:
+Single run (one alpha, one setting):
   python parallel_get_multiturn_steered.py data.csv out.csv \\
-    meta-llama/Meta-Llama-3.1-8B-Instruct supportv2 \\
-    --probe-dir ./probe_out --steer-alpha 1.0 \\
-    --user-model gpt4o --max-user-turns 5 --max-workers 1
+    meta-llama/Llama-3.3-70B-Instruct 4dims \\
+    --probe-dir ./probe_out --steer-alpha 1.0 --use-4bit
 
-  # Fixed user persona from prompts.py (turn 2+)
-  python parallel_get_multiturn_steered.py data.csv out.csv \\
-    Qwen/Qwen2.5-7B-Instruct 4dims \\
-    --probe-dir ./probe_out --persona emotional_support
+Batch run (one model load; all alphas × all settings):
+  python parallel_get_multiturn_steered.py --batch \\
+    --output-dir test_results/objectivity_seeking_steered \\
+    --steer-alphas -1,-0.5,0.5 \\
+    --setting data/valpairs-modified-obj-15.csv,valpairs_obj_m2_sw11,2,11 \\
+    --setting data/valpairs-modified-obj-15.csv,valpairs_obj_m2_sw5,2,5 \\
+    --setting data/valpairs-modified-val-15.csv,valpairs_val_m1_sw5,1,5 \\
+    --setting data/valpairs-modified-val-15.csv,valpairs_val_m1_sw11,1,11 \\
+    meta-llama/Llama-3.3-70B-Instruct 4dims \\
+    --probe-dir ./probe_out --use-4bit
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -24,6 +31,7 @@ import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from threading import Lock
 from types import SimpleNamespace
 from typing import Callable, Optional
@@ -32,7 +40,6 @@ import numpy as np
 import pandas as pd
 import torch
 
-# Reuse multi-turn helpers and user-side API/local routing
 import parallel_get_multiturn as pgm
 
 from prompts import (
@@ -49,10 +56,6 @@ if _PROBES_DIR not in sys.path:
 
 import sample_and_generate_steered as sgs  # noqa: E402
 
-# -----------------------------------------------------------------------------
-# Personas (prompts.py) for simulated user
-# -----------------------------------------------------------------------------
-
 PERSONA_CHOICES = {
     "validation": support_seeking_user_prompt,
     "support_seeking": support_seeking_user_prompt,
@@ -62,6 +65,20 @@ PERSONA_CHOICES = {
     "emotion_avoidant": emotion_avoidant_user_prompt,
 }
 
+DEFAULT_SETTINGS = [
+    ("data/valpairs-modified-obj-15.csv", "valpairs_obj_m2_sw11", 2, 11),
+    ("data/valpairs-modified-obj-15.csv", "valpairs_obj_m2_sw5", 2, 5),
+    ("data/valpairs-modified-val-15.csv", "valpairs_val_m1_sw5", 1, 5),
+    ("data/valpairs-modified-val-15.csv", "valpairs_val_m1_sw11", 1, 11),
+]
+
+
+@dataclass(frozen=True)
+class RunSetting:
+    input_csv: str
+    out_prefix: str
+    user_sim_mode: int
+    user_sim_switch_turn: int
 
 
 def build_simulate_user_prompt(
@@ -69,8 +86,6 @@ def build_simulate_user_prompt(
     seek_validation: Optional[bool] = None,
     persona: Optional[str] = None,
 ) -> str:
-    """Build prompt for simulating User A's next message."""
-
     base = (
         f"{user_llm_system_prompt}\n"
         f"Conversation so far:\n"
@@ -97,12 +112,62 @@ def build_simulate_user_prompt(
     return base
 
 
-# -----------------------------------------------------------------------------
-# Steered assistant (global, guarded by lock for thread safety)
-# -----------------------------------------------------------------------------
-
 _assistant_lock = Lock()
 _steer_bundle: Optional[dict] = None
+
+
+def parse_alphas(alpha_str: str) -> list[float]:
+    return [float(x.strip()) for x in alpha_str.split(",") if x.strip()]
+
+
+def parse_setting(spec: str) -> RunSetting:
+    """Parse input_csv,out_prefix,sim_mode,switch_turn."""
+    parts = [p.strip() for p in spec.split(",")]
+    if len(parts) != 4:
+        raise ValueError(
+            f"Invalid --setting {spec!r}; expected "
+            "input_csv,out_prefix,sim_mode,switch_turn"
+        )
+    return RunSetting(parts[0], parts[1], int(parts[2]), int(parts[3]))
+
+
+def alpha_subdir_name(alpha: float) -> str:
+    return f"alpha_{alpha}"
+
+
+def alpha_to_flat_suffix(alpha: float) -> str:
+    if alpha == -1:
+        return "alpha_m1"
+    if alpha == -0.5:
+        return "alpha_m0p5"
+    if alpha == 0.5:
+        return "alpha0p5"
+    if alpha == 1:
+        return "alpha1"
+    if alpha == 0:
+        return "base"
+    return "alpha_" + str(alpha).replace(".", "p")
+
+
+def resolve_output_csv(
+    output_dir: str,
+    layout: str,
+    alpha: float,
+    out_prefix: str,
+) -> str:
+    if layout == "alpha_subdir":
+        return os.path.join(output_dir, alpha_subdir_name(alpha), f"{out_prefix}.csv")
+    if layout == "flat_suffix":
+        suffix = alpha_to_flat_suffix(alpha)
+        return os.path.join(output_dir, f"{out_prefix}_{suffix}.csv")
+    raise ValueError(f"Unknown output layout: {layout!r}")
+
+
+def set_steer_alpha(alpha: float) -> None:
+    if _steer_bundle is None:
+        raise RuntimeError("Steered assistant not initialized")
+    _steer_bundle["hook_state"]["alpha"] = float(alpha)
+    _steer_bundle["steer_alpha"] = float(alpha)
 
 
 def _init_steered_assistant(
@@ -121,7 +186,8 @@ def _init_steered_assistant(
 ) -> None:
     global _steer_bundle
     if _steer_bundle is not None:
-        raise RuntimeError("Steered assistant already initialized")
+        set_steer_alpha(steer_alpha)
+        return
 
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -139,7 +205,9 @@ def _init_steered_assistant(
     )
     model, tokenizer, input_device = sgs.build_model_and_tokenizer(ns)
 
-    direction_np = np.load(os.path.join(probe_dir, "validation_direction.npy")).astype(np.float32)
+    direction_np = np.load(os.path.join(probe_dir, "validation_direction.npy")).astype(
+        np.float32
+    )
     direction = torch.tensor(direction_np, device=input_device, dtype=torch.float32)
 
     best_layer = None
@@ -149,8 +217,10 @@ def _init_steered_assistant(
             meta = json.load(f)
         best_layer = int(meta.get("best_layer", -1))
 
-    layer = layer_override if layer_override >= 0 else (
-        best_layer if best_layer is not None and best_layer >= 0 else 20
+    layer = (
+        layer_override
+        if layer_override >= 0
+        else (best_layer if best_layer is not None and best_layer >= 0 else 20)
     )
 
     hook_handle, hook_state = sgs.register_single_alpha_hook(model, layer, direction)
@@ -213,11 +283,6 @@ def _cleanup_steered_assistant() -> None:
     if _steer_bundle is not None:
         _steer_bundle["hook_handle"].remove()
         _steer_bundle = None
-
-
-# -----------------------------------------------------------------------------
-# Multi-turn row runner (assistant via steered local model)
-# -----------------------------------------------------------------------------
 
 
 def run_for_row_steered(
@@ -350,22 +415,332 @@ def process_row_wrapper(args):
         return row_id, [], str(e)
 
 
-def main():
+def _prepare_dataframe(
+    input_csv: str,
+    sample_n: Optional[int],
+    first_n: Optional[int],
+) -> tuple[pd.DataFrame, list[str], Optional[str], str]:
+    df = pd.read_csv(input_csv)
+    user_cols = pgm.get_sorted_user_cols(df)
+    if not user_cols:
+        raise ValueError(
+            "No columns matching 'user_<n>' or fallback prompt columns in input CSV."
+        )
+
+    if sample_n is not None and sample_n < len(df):
+        df_sub = df.sample(sample_n, random_state=42).copy()
+    elif first_n is not None:
+        df_sub = df.head(first_n).copy()
+    else:
+        df_sub = df.copy()
+
+    if "conv_id" in df_sub.columns:
+        id_col = "conv_id"
+    elif "pair_id" in df_sub.columns:
+        id_col = "pair_id"
+    else:
+        id_col = None
+    id_col_output = id_col if id_col else "conv_id"
+    return df_sub, user_cols, id_col, id_col_output
+
+
+def _get_processed_conv_ids(output_csv: str) -> set:
+    """Read pair_id/conv_id from an existing output file (no console noise)."""
+    if not os.path.exists(output_csv):
+        return set()
+    try:
+        existing_df = pd.read_csv(output_csv)
+    except Exception:
+        return set()
+    if "conv_id" in existing_df.columns:
+        return set(existing_df["conv_id"].unique())
+    if "pair_id" in existing_df.columns:
+        return set(existing_df["pair_id"].unique())
+    return set()
+
+
+def count_remaining_conversations(
+    input_csv: str,
+    output_csv: str,
+    sample_n: Optional[int],
+    first_n: Optional[int],
+) -> int:
+    processed_conv_ids = _get_processed_conv_ids(output_csv)
+    df_sub, _, id_col, _ = _prepare_dataframe(input_csv, sample_n, first_n)
+    if id_col:
+        df_remaining = df_sub[~df_sub[id_col].isin(processed_conv_ids)].copy()
+    else:
+        df_remaining = df_sub[~df_sub.index.isin(processed_conv_ids)].copy()
+    return len(df_remaining)
+
+
+def is_configuration_complete(
+    input_csv: str,
+    output_csv: str,
+    sample_n: Optional[int],
+    first_n: Optional[int],
+) -> bool:
+    """True when every conversation in the input subset is already in output_csv."""
+    return count_remaining_conversations(input_csv, output_csv, sample_n, first_n) == 0
+
+
+def run_one_configuration(
+    *,
+    input_csv: str,
+    output_csv: str,
+    assistant_model: str,
+    task: str,
+    probe_dir: str,
+    steer_alpha: float,
+    user_client,
+    user_model_name: str,
+    layer_override: int,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    do_sample: bool,
+    use_4bit: bool,
+    device_map: str,
+    trust_remote_code: bool,
+    attn_impl: str,
+    sample_n: Optional[int],
+    first_n: Optional[int],
+    max_user_turns: int,
+    max_workers: int,
+    user_sim_mode: int,
+    user_sim_switch_turn: int,
+    persona: Optional[str],
+) -> bool:
+    """
+    Run conversations for one (setting, alpha) pair.
+    Returns True if any work was done, False if skipped (already complete).
+    """
+    if is_configuration_complete(input_csv, output_csv, sample_n, first_n):
+        print(f"SKIP (already complete): {output_csv}")
+        return False
+
+    os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
+    all_records, processed_conv_ids = pgm.load_existing_results(output_csv)
+
+    steer_meta = {
+        "steer_alpha": steer_alpha,
+        "steer_layer": None,
+        "assistant_hf_model": assistant_model,
+        "probe_dir": os.path.abspath(probe_dir),
+    }
+
+    _init_steered_assistant(
+        hf_model=assistant_model,
+        probe_dir=probe_dir,
+        steer_alpha=steer_alpha,
+        layer_override=layer_override,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        do_sample=do_sample,
+        use_4bit=use_4bit,
+        device_map=device_map,
+        trust_remote_code=trust_remote_code,
+        attn_impl=attn_impl,
+    )
+    steer_meta["steer_layer"] = _steer_bundle["layer"]
+
+    df_sub, user_cols, id_col, id_col_output = _prepare_dataframe(
+        input_csv, sample_n, first_n
+    )
+
+    if id_col:
+        df_remaining = df_sub[~df_sub[id_col].isin(processed_conv_ids)].copy()
+    else:
+        df_remaining = df_sub[~df_sub.index.isin(processed_conv_ids)].copy()
+
+    print(f"\n{'=' * 80}")
+    print(f"Input:  {input_csv}")
+    print(f"Output: {output_csv}")
+    print(f"steer_alpha={steer_alpha}  user_sim_mode={user_sim_mode}  "
+          f"switch_turn={user_sim_switch_turn}")
+    print(f"Remaining conversations: {len(df_remaining)} / {len(df_sub)}")
+    print(f"{'=' * 80}\n")
+
+    if max_workers > 1:
+        print(
+            "Note: max-workers>1 only helps if user simulator is remote; "
+            "assistant shares one GPU model behind a lock."
+        )
+
+    save_lock = Lock()
+    tasks = [
+        (
+            row[id_col] if id_col else idx,
+            id_col_output,
+            row,
+            user_client,
+            user_model_name,
+            user_cols,
+            task,
+            max_user_turns,
+            user_sim_mode,
+            user_sim_switch_turn,
+            persona,
+            steer_meta,
+        )
+        for idx, row in df_remaining.iterrows()
+    ]
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_row_wrapper, t): t[0] for t in tasks}
+        for fut in as_completed(futures):
+            row_id = futures[fut]
+            try:
+                _rid, records, err = fut.result()
+                if err:
+                    print(f"[WARNING] {id_col_output}={row_id}: {err}")
+                else:
+                    all_records.extend(records)
+                    with save_lock:
+                        pd.DataFrame.from_records(all_records).to_csv(
+                            output_csv, index=False
+                        )
+                    print(
+                        f"Progress: saved {len(all_records)} rows "
+                        f"(last {id_col_output}={row_id})"
+                    )
+            except Exception as e:
+                print(f"[ERROR] {id_col_output}={row_id}: {e}")
+
+    pd.DataFrame.from_records(all_records).to_csv(output_csv, index=False)
+    print(f"Done. Wrote {len(all_records)} rows to {output_csv}")
+    return True
+
+
+def run_batch(args: argparse.Namespace, settings: list[RunSetting]) -> None:
+    alphas = parse_alphas(args.steer_alphas)
+    if not alphas:
+        raise ValueError("No alphas in --steer-alphas")
+
+    jobs: list[tuple[float, RunSetting, str]] = []
+    for alpha in alphas:
+        for setting in settings:
+            out_csv = resolve_output_csv(
+                args.output_dir, args.output_layout, alpha, setting.out_prefix
+            )
+            jobs.append((alpha, setting, out_csv))
+
+    pending: list[tuple[float, RunSetting, str]] = []
+    skipped = 0
+    print(f"Batch plan: {len(alphas)} alphas × {len(settings)} settings = {len(jobs)} outputs")
+    for alpha, setting, out_csv in jobs:
+        if is_configuration_complete(
+            setting.input_csv, out_csv, args.sample_n, args.first_n
+        ):
+            skipped += 1
+            print(f"  SKIP  alpha={alpha} {setting.out_prefix} -> {out_csv}")
+        else:
+            pending.append((alpha, setting, out_csv))
+            n_left = count_remaining_conversations(
+                setting.input_csv, out_csv, args.sample_n, args.first_n
+            )
+            print(f"  RUN   alpha={alpha} {setting.out_prefix} -> {out_csv} ({n_left} convs left)")
+
+    print(f"Skipping {skipped} complete output(s); running {len(pending)} job(s).")
+    if not pending:
+        print("All batch outputs already complete — no model load.")
+        return
+
+    user_model_key = args.user_model or "gpt4o"
+    if user_model_key not in pgm.AVAILABLE_MODELS:
+        raise ValueError(
+            f"Unknown user model: {user_model_key}. Available: {list(pgm.AVAILABLE_MODELS.keys())}"
+        )
+    user_client = pgm.initialize_client(user_model_key, args.api_key)
+    user_model_name = pgm.AVAILABLE_MODELS[user_model_key]
+    print(f"User simulation model: {user_model_key}")
+
+    try:
+        for alpha, setting, out_csv in pending:
+            print(f"\n>>> alpha={alpha} setting={setting.out_prefix}")
+            run_one_configuration(
+                input_csv=setting.input_csv,
+                output_csv=out_csv,
+                assistant_model=args.assistant_model,
+                task=args.task,
+                probe_dir=args.probe_dir,
+                steer_alpha=alpha,
+                user_client=user_client,
+                user_model_name=user_model_name,
+                layer_override=args.layer,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                do_sample=args.do_sample,
+                use_4bit=args.use_4bit,
+                device_map=args.device_map,
+                trust_remote_code=args.trust_remote_code,
+                attn_impl=args.attn_impl,
+                sample_n=args.sample_n,
+                first_n=args.first_n,
+                max_user_turns=args.max_user_turns,
+                max_workers=args.max_workers,
+                user_sim_mode=setting.user_sim_mode,
+                user_sim_switch_turn=setting.user_sim_switch_turn,
+                persona=args.persona,
+            )
+    finally:
+        _cleanup_steered_assistant()
+
+    print(f"\nBatch finished. Outputs under {args.output_dir}/")
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Multi-turn sim with steered HF assistant (probe direction hook)."
     )
-    parser.add_argument("input_csv")
-    parser.add_argument("output_csv")
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="One model load; loop alphas and settings. Skips any output CSV that "
+        "already contains all conversations (requires --output-dir, --steer-alphas).",
+    )
+    parser.add_argument("input_csv", nargs="?", help="Input CSV (single-run mode)")
+    parser.add_argument("output_csv", nargs="?", help="Output CSV (single-run mode)")
     parser.add_argument(
         "assistant_model",
         help="Hugging Face model id or path for the steered assistant",
     )
     parser.add_argument("task", help="Assistant prompt type (e.g. supportv2, 4dims)")
-    parser.add_argument("--user-model", default=None, help="User simulator model key (default: gpt4o)")
+    parser.add_argument("--user-model", default=None)
     parser.add_argument("--api-key", default=None)
-    parser.add_argument("--probe-dir", required=True, help="Directory with validation_direction.npy (+ meta.json)")
-    parser.add_argument("--steer-alpha", type=float, default=0.0, help="Steering strength (0 = hook no-op)")
-    parser.add_argument("--layer", type=int, default=-1, help="Override layer index (-1 = use meta.json)")
+    parser.add_argument("--probe-dir", required=True)
+    parser.add_argument(
+        "--steer-alpha",
+        type=float,
+        default=None,
+        help="Steering strength for single-run mode (default 0)",
+    )
+    parser.add_argument(
+        "--steer-alphas",
+        default="0",
+        help="Comma-separated alphas for --batch (e.g. -1,-0.5,0,0.5,1)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output root for --batch (writes alpha_*/prefix.csv or flat suffixes)",
+    )
+    parser.add_argument(
+        "--output-layout",
+        choices=("alpha_subdir", "flat_suffix"),
+        default="alpha_subdir",
+        help="alpha_subdir: out_dir/alpha_X/prefix.csv; flat_suffix: out_dir/prefix_suffix.csv",
+    )
+    parser.add_argument(
+        "--setting",
+        action="append",
+        default=[],
+        metavar="SPEC",
+        help="Batch setting: input_csv,out_prefix,sim_mode,switch_turn (repeatable)",
+    )
+    parser.add_argument("--layer", type=int, default=-1)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.9)
@@ -373,25 +748,19 @@ def main():
     parser.add_argument("--use-4bit", action="store_true")
     parser.add_argument("--device-map", type=str, default="auto")
     parser.add_argument("--trust-remote-code", action="store_true")
-    parser.add_argument("--attn-impl", default="", help="e.g. flash_attention_2")
+    parser.add_argument("--attn-impl", default="")
     parser.add_argument("--sample-n", type=int, default=None)
     parser.add_argument("--first-n", type=int, default=None)
     parser.add_argument("--max-user-turns", type=int, default=10)
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=1,
-        help="Parallel rows; assistant generation is locked (default 1 recommended on one GPU).",
-    )
+    parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--user-sim-mode", type=int, default=1)
     parser.add_argument("--user-sim-switch-turn", type=int, default=5)
-    parser.add_argument(
-        "--persona",
-        default=None,
-        choices=sorted(PERSONA_CHOICES.keys()),
-        help="If set, use this prompts.py persona for user simulation on turns 2+ "
-        "(validation / objectivity switching is disabled).",
-    )
+    parser.add_argument("--persona", default=None, choices=sorted(PERSONA_CHOICES.keys()))
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.task not in pgm.AVAILABLE_PROMPTS:
@@ -399,31 +768,46 @@ def main():
             f"Unknown prompt type: {args.task}. Available: {list(pgm.AVAILABLE_PROMPTS.keys())}"
         )
 
+    if args.batch:
+        if not args.output_dir:
+            raise ValueError("--batch requires --output-dir")
+        settings = [parse_setting(s) for s in args.setting] if args.setting else [
+            RunSetting(*t) for t in DEFAULT_SETTINGS
+        ]
+        os.makedirs(args.output_dir, exist_ok=True)
+        run_batch(args, settings)
+        return
+
+    if not args.input_csv or not args.output_csv:
+        parser.error("single-run mode requires input_csv and output_csv (or use --batch)")
+
+    steer_alpha = 0.0 if args.steer_alpha is None else args.steer_alpha
+
+    if is_configuration_complete(
+        args.input_csv, args.output_csv, args.sample_n, args.first_n
+    ):
+        print(f"SKIP (already complete): {args.output_csv}")
+        return
+
     user_model_key = args.user_model or "gpt4o"
     if user_model_key not in pgm.AVAILABLE_MODELS:
         raise ValueError(
             f"Unknown user model: {user_model_key}. Available: {list(pgm.AVAILABLE_MODELS.keys())}"
         )
-
-    all_records, processed_conv_ids = pgm.load_existing_results(args.output_csv)
-    os.makedirs(os.path.dirname(args.output_csv) or ".", exist_ok=True)
-
     user_client = pgm.initialize_client(user_model_key, args.api_key)
     user_model_name = pgm.AVAILABLE_MODELS[user_model_key]
     print(f"User simulation model: {user_model_key}")
 
-    steer_meta = {
-        "steer_alpha": args.steer_alpha,
-        "steer_layer": None,
-        "assistant_hf_model": args.assistant_model,
-        "probe_dir": os.path.abspath(args.probe_dir),
-    }
-
     try:
-        _init_steered_assistant(
-            hf_model=args.assistant_model,
+        run_one_configuration(
+            input_csv=args.input_csv,
+            output_csv=args.output_csv,
+            assistant_model=args.assistant_model,
+            task=args.task,
             probe_dir=args.probe_dir,
-            steer_alpha=args.steer_alpha,
+            steer_alpha=steer_alpha,
+            user_client=user_client,
+            user_model_name=user_model_name,
             layer_override=args.layer,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
@@ -433,86 +817,14 @@ def main():
             device_map=args.device_map,
             trust_remote_code=args.trust_remote_code,
             attn_impl=args.attn_impl,
+            sample_n=args.sample_n,
+            first_n=args.first_n,
+            max_user_turns=args.max_user_turns,
+            max_workers=args.max_workers,
+            user_sim_mode=args.user_sim_mode,
+            user_sim_switch_turn=args.user_sim_switch_turn,
+            persona=args.persona,
         )
-        steer_meta["steer_layer"] = _steer_bundle["layer"]
-
-        df = pd.read_csv(args.input_csv)
-        user_cols = pgm.get_sorted_user_cols(df)
-        if not user_cols:
-            raise ValueError("No columns matching 'user_<n>' or fallback prompt columns in input CSV.")
-
-        if args.sample_n is not None and args.sample_n < len(df):
-            df_sub = df.sample(args.sample_n, random_state=42).copy()
-        elif args.first_n is not None:
-            df_sub = df.head(args.first_n).copy()
-        else:
-            df_sub = df.copy()
-
-        if "conv_id" in df_sub.columns:
-            id_col = "conv_id"
-        elif "pair_id" in df_sub.columns:
-            id_col = "pair_id"
-        else:
-            id_col = None
-        id_col_output = id_col if id_col else "conv_id"
-
-        if id_col:
-            df_remaining = df_sub[~df_sub[id_col].isin(processed_conv_ids)].copy()
-        else:
-            df_remaining = df_sub[~df_sub.index.isin(processed_conv_ids)].copy()
-
-        if len(df_remaining) == 0:
-            print("All conversations already processed.")
-            return
-
-        if args.max_workers > 1:
-            print(
-                "Note: max-workers>1 only helps if user simulator is remote; "
-                "assistant shares one GPU model behind a lock."
-            )
-
-        save_lock = Lock()
-        tasks = [
-            (
-                row[id_col] if id_col else idx,
-                id_col_output,
-                row,
-                user_client,
-                user_model_name,
-                user_cols,
-                args.task,
-                args.max_user_turns,
-                args.user_sim_mode,
-                args.user_sim_switch_turn,
-                args.persona,
-                steer_meta,
-            )
-            for idx, row in df_remaining.iterrows()
-        ]
-
-        with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-            futures = {executor.submit(process_row_wrapper, t): t[0] for t in tasks}
-            for fut in as_completed(futures):
-                row_id = futures[fut]
-                try:
-                    _rid, records, err = fut.result()
-                    if err:
-                        print(f"[WARNING] {id_col_output}={row_id}: {err}")
-                    else:
-                        all_records.extend(records)
-                        with save_lock:
-                            pd.DataFrame.from_records(all_records).to_csv(
-                                args.output_csv, index=False
-                            )
-                        print(
-                            f"Progress: saved {len(all_records)} rows "
-                            f"(last {id_col_output}={row_id})"
-                        )
-                except Exception as e:
-                    print(f"[ERROR] {id_col_output}={row_id}: {e}")
-
-        pd.DataFrame.from_records(all_records).to_csv(args.output_csv, index=False)
-        print(f"Done. Wrote {len(all_records)} rows to {args.output_csv}")
     finally:
         _cleanup_steered_assistant()
 
