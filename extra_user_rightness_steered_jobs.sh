@@ -22,7 +22,7 @@ PROBE_DIR="70b_steering_vectors/probe_out_user_rightness_0225_llama70b_FULL_llam
 python parallel_get_multiturn_steered.py --batch \
   --output-dir "$OUT_DIR" \
   --output-layout flat_suffix \
-  --steer-alphas "-1,-0.5,0,0.5,1" \
+  --steer-alphas=-1,-0.5,0,0.5,1 \
   --setting "data/valpairs-modified-obj-15.csv,valpairs_obj_m2_sw11,2,11" \
   --setting "data/valpairs-modified-obj-15.csv,valpairs_obj_m2_sw5,2,5" \
   --setting "data/valpairs-modified-val-15.csv,valpairs_val_m1_sw5,1,5" \
