@@ -22,11 +22,11 @@ PROBE_DIR="70b_steering_vectors/probe_out_validation_seeking_0225_llama70b_FULL_
 
 "$PYTHON" parallel_get_multiturn_steered.py --batch \
   --output-dir "$OUT_DIR" \
-  --steer-alphas=-1,-0.5,0,0.5,1 \
-  --setting "data/yta.csv,valpairs_val_m1_sw5,1,5" \
-  --setting "data/yta.csv,valpairs_val_m1_sw11,1,11" \
-  --setting "data/yta.csv,valpairs_obj_m2_sw5,2,5" \
-  --setting "data/yta.csv,valpairs_obj_m2_sw11,2,11" \
+  --steer-alphas=-1,0,1,-2,2 \
+  --setting "data/yta.csv,yta_m1_sw5,1,5" \
+  --setting "data/yta.csv,yta_m1_sw11,1,11" \
+  --setting "data/yta.csv,yta_m2_sw5,2,5" \
+  --setting "data/yta.csv,yta_m2_sw11,2,11" \
   "$MODEL" "$TASK" \
   --probe-dir "$PROBE_DIR" \
   --use-4bit
